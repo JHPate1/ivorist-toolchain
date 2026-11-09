@@ -28,9 +28,11 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'parseInt(process.versions.
         curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash - >/dev/null
         $SUDO apt-get install -y nodejs git curl ca-certificates >/dev/null
     elif command -v dnf >/dev/null 2>&1; then
-        $SUDO dnf install -y nodejs20 git curl 2>/dev/null || $SUDO dnf install -y nodejs git curl
+        # curl/curl-minimal is already present on AL2023; installing the full
+        # curl package conflicts with curl-minimal, so it is never named here.
+        $SUDO dnf install -y nodejs20 git 2>/dev/null || $SUDO dnf install -y nodejs git 2>/dev/null || $SUDO dnf install -y nodejs20 git --allowerasing
     elif command -v yum >/dev/null 2>&1; then
-        $SUDO yum install -y nodejs20 git curl 2>/dev/null || $SUDO yum install -y nodejs git curl
+        $SUDO yum install -y nodejs20 git 2>/dev/null || $SUDO yum install -y nodejs git 2>/dev/null || $SUDO yum install -y nodejs20 git --allowerasing
     else
         echo "no supported package manager found (need apt-get/dnf/yum)" >&2
         exit 1
