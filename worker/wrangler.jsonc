@@ -1,0 +1,62 @@
+﻿// Ivorist Gateway: Discord-facing edge + job queue + artifact store.
+// Discord Interactions endpoint + 24/7 gateway session (Durable Object),
+// KV job queue, R2 artifact storage, cron re-queue safety net.
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "ivorist-gateway",
+    "main": "src/index.js",
+    "compatibility_date": "2025-05-01",
+
+    "workers_dev": true,
+
+    "kv_namespaces": [
+        {
+            "binding": "JOBS",
+            "id": "74404c48dccd47e5b6d44d32287f715c"
+        }
+    ],
+
+    "r2_buckets": [
+        {
+            "binding": "BLOBS",
+            "bucket_name": "ivorist-uploads"
+        }
+    ],
+
+    "durable_objects": {
+        "bindings": [
+            {
+                "name": "GATEWAY",
+                "class_name": "GatewayBot"
+            }
+        ]
+    },
+
+    "migrations": [
+        {
+            "tag": "v1",
+            "new_sqlite_classes": ["GatewayBot"]
+        }
+    ],
+
+    "triggers": {
+        "crons": ["*/5 * * * *"]
+    },
+
+    "vars": {
+        "CHANNEL_APP": "1569366033389588523",
+        "CHANNEL_PROJECT": "1569366921961545780",
+        "CHANNEL_CHANGE": "1569367133685678182",
+        "CHANNEL_BANK": "1569367283879387346",
+        "GUILD_ID": "",
+        "APP_DOMAIN_BASE": "ivorists.com"
+    },
+
+    // Secrets (set with `npx wrangler secret put`):
+    //   DISCORD_TOKEN       bot token (from the Discord developer portal)
+    //   DISCORD_PUBLIC_KEY  application public key (interaction signature check)
+    //   RUNNER_TOKEN        shared secret for the local runner daemon
+    "observability": {
+        "enabled": true
+    }
+}

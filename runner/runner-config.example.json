@@ -1,0 +1,9 @@
+{
+    "workerBase": "https://ivorist-gateway.YOUR-WORKERS-SUBDOMAIN.workers.dev",
+    "runnerToken": "paste-the-same-token-here",
+    "siteRepo": "C:\\Users\\hemal\\Downloads\\ivorist-website",
+    "inboxDir": "C:\\Users\\hemal\\Downloads\\.ivorist-runner",
+    "discordToken": "",
+    "discordApplicationId": "",
+    "discordGuildId": ""
+}
