@@ -30,7 +30,7 @@ export default {
             const alive = await env.JOBS.get("runner:alive");
             return json({
                 ok: true,
-                discordin: env.DISCORD_PUBLIC_KEY && env.DISCORD_PUBLIC_KEY !== "set-later" ? "ready" : "not configured",
+                discord: env.DISCORD_TOKEN && env.DISCORD_TOKEN !== "set-later" ? "ready" : "not configured",
                 runner: alive ? "online" : "offline"
             });
         }
@@ -417,23 +417,39 @@ async function runner(request, env, ctx) {
         return json({ ok: true });
     }
 
-    // Test helper: enqueue a job without Discord (used to validate the pipeline).
-    if (request.method === "POST" && route === "/runner/enqueue-test") {
-        const meta = JSON.parse(request.headers.get("X-Test-Job") || "{}");
+    if (request.method === "POST" && (route === "/runner/enqueue-test" || route === "/runner/enqueue")) {
+        const meta = JSON.parse(request.headers.get("X-Job") || request.headers.get("X-Test-Job") || "{}");
         const bytes = await request.arrayBuffer();
         if (!metadataValid(meta, bytes.byteLength)) {
-            return json({ error: "invalid test job metadata" }, 400);
+            return json({ error: "invalid job metadata" }, 400);
         }
         const res = await createJob(env, ctx, {
             type: meta.type,
-            userTag: "selftest",
-            userId: "0",
+            userTag: meta.userTag || "selftest",
+            userId: meta.userId || "0",
             opts: meta,
             dedupeKey: null,
             fileName: meta.fileName || "submission.zip",
             fileBytes: bytes
         });
         return json(res);
+    }
+
+    if (request.method === "GET" && route.startsWith("/runner/job/")) {
+        const id = decodeURIComponent(route.split("/").pop());
+        const job = await getJob(env, id);
+        if (!job) {
+            return json({ error: "unknown job" }, 404);
+        }
+        return json(job);
+    }
+
+    if (request.method === "GET" && route === "/runner/jobs") {
+        return json(await listJobs(env, 20));
+    }
+
+    if (request.method === "GET" && route === "/runner/apps") {
+        return json(await listApps(env));
     }
 
     return json({ error: "not found" }, 404);

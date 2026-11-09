@@ -49,7 +49,10 @@
         "CHANNEL_CHANGE": "1569367133685678182",
         "CHANNEL_BANK": "1569367283879387346",
         "GUILD_ID": "",
-        "APP_DOMAIN_BASE": "ivorists.com"
+        "APP_DOMAIN_BASE": "ivorists.com",
+        // "1" = the Durable Object holds the Discord gateway session itself.
+        // "0" = an external bot (AWS discordbot/) owns the session instead.
+        "GATEWAY_ENABLED": "0"
     },
 
     // Secrets (set with `npx wrangler secret put`):

@@ -53,6 +53,10 @@ export class GatewayBot {
         if (!validToken(this.env)) {
             return;
         }
+        if (this.env.GATEWAY_ENABLED === "0") {
+            // An external bot process (e.g. on AWS) owns the gateway session.
+            return;
+        }
         if (this.started && !force) {
             return;
         }

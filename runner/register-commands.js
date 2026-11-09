@@ -31,8 +31,8 @@ const COMMANDS = [
         options: [
             { type: 3, name: "subdomain", description: "Your subdomain, e.g. my-tool (becomes https://my-tool.ivorists.com)", required: true },
             { type: 3, name: "name", description: "Project name", required: true },
-            { type: 3, name: "description", description: "What the app does", required: false },
-            { type: 11, name: "zip", description: "Zip with the app (index.html at root, optional worker.js + .env)", required: true }
+            { type: 11, name: "zip", description: "Zip with the app (index.html at root, optional worker.js + .env)", required: true },
+            { type: 3, name: "description", description: "What the app does", required: false }
         ]
     },
     {
@@ -40,10 +40,10 @@ const COMMANDS = [
         description: "Submit a project to ivorists.com (own page, listed in projects.json).",
         options: [
             { type: 3, name: "name", description: "Project name", required: true },
-            { type: 3, name: "category", description: "Category, e.g. Software / Hardware / Research", required: false },
             { type: 3, name: "summary", description: "One-line summary used on the site", required: true },
-            { type: 3, name: "description", description: "Longer walkthrough (goes on the tracker only)", required: false },
-            { type: 11, name: "zip", description: "Zip with the project page (index.html at zip root)", required: true }
+            { type: 11, name: "zip", description: "Zip with the project page (index.html at zip root)", required: true },
+            { type: 3, name: "category", description: "Category, e.g. Software / Hardware / Research", required: false },
+            { type: 3, name: "description", description: "Longer walkthrough (goes on the tracker only)", required: false }
         ]
     },
     {
