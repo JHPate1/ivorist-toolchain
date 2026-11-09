@@ -27,36 +27,19 @@ const base = !GUILD_ID ? new URL(`https://discord.com/api/v10/applications/${APP
 const COMMANDS = [
     {
         name: "create",
-        description: "Deploy a web app on ivorists.com (strict rules apply).",
-        options: [
-            { type: 3, name: "subdomain", description: "Your subdomain, e.g. my-tool (becomes https://my-tool.ivorists.com)", required: true },
-            { type: 3, name: "name", description: "Project name", required: true },
-            { type: 11, name: "zip", description: "Zip with the app (index.html at root, optional worker.js + .env)", required: true },
-            { type: 3, name: "description", description: "What the app does", required: false }
-        ]
+        description: "Open the deploy form — files are attached in the channel afterwards."
     },
     {
         name: "project",
-        description: "Submit a project to ivorists.com (own page, listed in projects.json).",
-        options: [
-            { type: 3, name: "name", description: "Project name", required: true },
-            { type: 3, name: "summary", description: "One-line summary used on the site", required: true },
-            { type: 11, name: "zip", description: "Zip with the project page (index.html at zip root)", required: true },
-            { type: 3, name: "category", description: "Category, e.g. Software / Hardware / Research", required: false },
-            { type: 3, name: "description", description: "Longer walkthrough (goes on the tracker only)", required: false }
-        ]
+        description: "Open the project form — text alone builds the project page."
     },
     {
         name: "change",
-        description: "Submit a change to the live site (html/css/js/json/images).",
-        options: [
-            { type: 3, name: "summary", description: "What changes and why", required: true },
-            { type: 11, name: "zip", description: "Zip with the changed files (paths mirror the repo)", required: true }
-        ]
+        description: "Open the site-change form — attach files in the channel afterwards."
     },
     {
         name: "bank",
-        description: "Ivorist Bank (coming soon)."
+        description: "Open the Ivorist Bank request form (logged until launch)."
     },
     {
         name: "apps",

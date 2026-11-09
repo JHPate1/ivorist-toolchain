@@ -163,6 +163,141 @@ function parseEnvFile(text) {
     return entries;
 }
 
+// Modal env lines use the exact same NAME=value format as .env files.
+function parseEnvLines(text) {
+    return parseEnvFile(text);
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+/**
+ * Text-only project: build the project page straight from the modal form
+ * fields (name, summary, category, description, highlights, technologies).
+ * Every string is HTML-escaped; the page is static and self-contained.
+ */
+function generateProjectPage(job) {
+    const cat = escapeHtml(job.category || "Software");
+    const name = escapeHtml(job.name || job.title || "Untitled project");
+    const summary = escapeHtml(job.summary || "");
+    const paras = String(job.description || "")
+        .split(/\r?\n\s*\r?\n/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .slice(0, 20);
+
+    const tech = String(job.technologies || "")
+        .split(/[,;\n]/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 12);
+
+    const highlights = String(job.highlights || "")
+        .split(/\r?\n/)
+        .map((h) => h.trim())
+        .filter(Boolean)
+        .slice(0, 10);
+
+    const bodyBlocks = [];
+    if (highlights.length) {
+        bodyBlocks.push(
+            `    <ul class=\"highlights\">${highlights.map((h) => `<li>${escapeHtml(h)}</li>`).join("")}</ul>`
+        );
+    }
+    for (const p of paras) {
+        bodyBlocks.push(`    <p>${escapeHtml(p)}</p>`);
+    }
+    if (!bodyBlocks.length && summary) {
+        bodyBlocks.push(`    <p>${escapeHtml(summary)}</p>`);
+    }
+
+    return `<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+<meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<title>${name} — Ivorist</title>
+<meta name=\"description\" content=\"${summary}\">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; }
+body {
+    background: #0a0e0b;
+    color: #e7ece9;
+    font-family: ui-sans-serif, system-ui, \"Segoe UI\", Arial, sans-serif;
+    line-height: 1.65;
+    min-height: 100vh;
+}
+main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 64px 24px 96px;
+}
+.cat {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #34d399;
+    font-weight: 600;
+}
+h1 {
+    font-size: clamp(30px, 6vw, 44px);
+    margin: 10px 0 14px;
+    letter-spacing: -0.02em;
+}
+.sum {
+    font-size: 18px;
+    color: #a8b5ae;
+    margin-bottom: 34px;
+}
+hr {
+    border: 0;
+    border-top: 1px solid #1d2722;
+    margin: 30px 0;
+}
+p { color: #cfd9d3; margin-bottom: 18px; }
+.highlights { margin: 0 0 22px; padding-left: 20px; color: #cfd9d3; }
+.highlights li { margin-bottom: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; }
+.chip {
+    border: 1px solid #1f3a2d;
+    color: #7fd6ab;
+    background: #0e1613;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 13px;
+}
+footer {
+    margin-top: 56px;
+    padding-top: 22px;
+    border-top: 1px solid #1d2722;
+    color: #79857e;
+    font-size: 13px;
+}
+footer a { color: #34d399; text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+    <div class=\"cat\">${cat}</div>
+    <h1>${name}</h1>
+    <p class=\"sum\">${summary}</p>
+    <hr>
+${bodyBlocks.join("\n")}
+${tech.length ? `\n    <div class=\"chips\">${tech.map((t) => `<span class=\"chip\">${escapeHtml(t)}</span>`).join("")}</div>\n` : ""}    <footer>Part of the <a href=\"https://ivorists.com/\">Ivorist</a> project index.</footer>
+</main>
+</body>
+</html>
+`;
+}
+
 /* -------------------- rejection helpers -------------------- */
 
 class Rejection extends Error {
@@ -183,6 +318,9 @@ async function runPipeline(job) {
     const step2 = steps[2];
     const step3 = steps[3];
     const step4 = steps[4];
+    if (!step0) {
+        throw new Error(`no pipeline for job type ${job.type} (stored, not executed)`);
+    }
 
     const work = path.join(INBOX, "inbox", job.id);
     const zipPath = path.join(work, job.fileName || "submission.zip");
@@ -192,31 +330,39 @@ async function runPipeline(job) {
     }
     mkdirSync(unpack, { recursive: true });
 
-    await progress(job.id, step0, "active", "downloading artifact");
+    // ---------------- artifact (optional: text-only forms) ----------------
+    let bytes = null;
+    if (job.fileName) {
+        await progress(job.id, step0, "active", "downloading artifact");
+        const res = await api(`/runner/artifact/${job.id}`);
+        if (!res.ok) {
+            throw new Error(`artifact download failed: HTTP ${res.status}`);
+        }
+        bytes = Buffer.from(await res.arrayBuffer());
+        if (bytes.length > rules.LIMITS.maxZipBytes) {
+            throw new Rejection(`artifact too large: ${(bytes.length / 1048576).toFixed(1)} MB`);
+        }
+        writeFileSync(zipPath, bytes);
 
-    // ---------------- artifact ----------------
-    const res = await api(`/runner/artifact/${job.id}`);
-    if (!res.ok) {
-        throw new Error(`artifact download failed: HTTP ${res.status}`);
-    }
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.length > rules.LIMITS.maxZipBytes) {
-        throw new Rejection(`artifact too large: ${(bytes.length / 1048576).toFixed(1)} MB`);
-    }
-    writeFileSync(zipPath, bytes);
-
-    // ---------------- safe unzip ----------------
-    const expand = spawnSync("powershell", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${unpack}' -Force`
-    ], { encoding: "utf8", timeout: 120000 });
-    if (expand.status !== 0) {
-        throw new Error(`unzip failed — zip may be corrupt: ${String(expand.stderr).trim().slice(0, 300)}`);
+        // ---------------- safe unzip ----------------
+        const expand = spawnSync("powershell", [
+            "-NoProfile", "-NonInteractive", "-Command",
+            `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${unpack}' -Force`
+        ], { encoding: "utf8", timeout: 120000 });
+        if (expand.status !== 0) {
+            throw new Error(`unzip failed — archive may be corrupt: ${String(expand.stderr).trim().slice(0, 300)}`);
+        }
+    } else if (job.type === "project") {
+        // text-only project form: the page is generated from the submitted fields
+        writeFileSync(path.join(unpack, "index.html"), generateProjectPage(job));
+        await progress(job.id, step0, "active", "text-only project (generated from the form)");
+    } else {
+        throw new Rejection("this submission has no files attached — reply with your files in the channel (the form alone is not enough for this job type)");
     }
 
     const files = walk(unpack);
     if (files.length === 0) {
-        throw new Rejection("zip is empty");
+        throw new Rejection("submission is empty");
     }
     if (files.length > rules.LIMITS.maxFileCount) {
         throw new Rejection(`too many files: ${files.length} (limit ${rules.LIMITS.maxFileCount})`);
@@ -224,10 +370,10 @@ async function runPipeline(job) {
 
     const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
     if (totalBytes > rules.LIMITS.maxZipBytes * 3) {
-        throw new Rejection(`zip extracts to ${(totalBytes / 1048576).toFixed(1)} MB — suspicious expansion`);
+        throw new Rejection(`submission extracts to ${(totalBytes / 1048576).toFixed(1)} MB — suspicious expansion`);
     }
 
-    // hard-deny executables anywhere in the archive
+    // hard-deny executables anywhere in the submission
     const denied = files.filter((f) => rules.isDeniedExtension(f.rel));
     if (denied.length) {
         throw new Rejection(`non-web executable included: ${denied.slice(0, 3).map((f) => f.rel).join(", ")}${denied.length > 3 ? "…" : ""}`);
@@ -245,7 +391,7 @@ async function runPipeline(job) {
         }
     }
 
-    await progress(job.id, step0, "done", `${files.length} files, ${(totalBytes / 1048576).toFixed(1)} MB`);
+    await progress(job.id, step0, "done", `${files.length} file(s), ${(totalBytes / 1048576).toFixed(1)} MB`);
 
     /* =====================================================
        WEB APP  (/create)
@@ -269,9 +415,12 @@ async function runPipeline(job) {
 
         await progress(job.id, step1, "active", "scanning for secrets");
 
-        // secrets policy
+        // secrets policy (modal env lines first, so a bundled .env overrides them)
         const envFiles = deployFiles.filter((f) => f.rel.endsWith(".env") || f.rel.includes(".env"));
         const envEntries = [];
+        if (job.envText) {
+            envEntries.push(...parseEnvLines(job.envText));
+        }
         for (const envFile of envFiles) {
             envEntries.push(...parseEnvFile(readTextSafe(envFile.abs)));
         }
@@ -352,6 +501,14 @@ async function runPipeline(job) {
             }
         } else {
             // static app: keep only safe env values as non-secret vars
+            if (job.envText) {
+                for (const { key, value } of parseEnvLines(job.envText)) {
+                    if (rules.DANGEROUS_ENV_KEYS.some((d) => d.key === key)) {
+                        continue;
+                    }
+                    staticVars[key] = value;
+                }
+            }
             for (const envFile of envFiles) {
                 for (const { key, value } of parseEnvFile(readTextSafe(envFile.abs))) {
                     if (rules.DANGEROUS_ENV_KEYS.some((d) => d.key === key)) {
@@ -480,6 +637,12 @@ async function runPipeline(job) {
             const projects = Array.isArray(data.projects) ? data.projects : [];
             const exists = projects.find((p) => p.id === slug);
             const highest = projects.reduce((max, p) => Math.max(max, parseInt(p.number || "0", 10) || 0), 0);
+            const techList = Array.isArray(job.technologies)
+                ? job.technologies
+                : String(job.technologies || "").split(/[,;\n]/).map((t) => t.trim()).filter(Boolean);
+            const highList = Array.isArray(job.highlights)
+                ? job.highlights
+                : String(job.highlights || "").split(/\r?\n/).map((h) => h.trim()).filter(Boolean);
             const entry = {
                 id: slug,
                 number: String(exists ? exists.number : String(highest + 1).padStart(3, "0")),
@@ -490,8 +653,8 @@ async function runPipeline(job) {
                 liveUrl: "",
                 repoUrl: "",
                 status: "released",
-                highlights: job.highlights || [],
-                technologies: job.technologies || []
+                highlights: highList,
+                technologies: techList
             };
             if (exists) {
                 Object.assign(exists, entry);

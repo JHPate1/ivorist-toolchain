@@ -8,22 +8,26 @@ const DISCORD_BASE = "https://discord.com/api/v10";
 
 export const COLORS = {
     queued: 0xf59e0b,
+    awaiting: 0xf59e0b,
     running: 0x2f6b49,
     done: 0x4ade80,
     failed: 0xb91c1c,
-    rejected: 0xb91c1c
+    rejected: 0xb91c1c,
+    parked: 0x2f6b49
 };
 
 export const TYPE_LABELS = {
     app: "Web app deploy",
     project: "Site project",
-    change: "Site change"
+    change: "Site change",
+    bank: "Ivorist Bank"
 };
 
 export const CHANNEL_FOR_TYPE = {
     app: "CHANNEL_APP",
     project: "CHANNEL_PROJECT",
-    change: "CHANNEL_CHANGE"
+    change: "CHANNEL_CHANGE",
+    bank: "CHANNEL_BANK"
 };
 
 export async function rest(env, method, path, body) {
@@ -95,7 +99,7 @@ export function trackerEmbed(job) {
         const step = job.steps[name] || { state: "pending", detail: "" };
         lines.push(`${STEP_ICONS[step.state] || step.icon} ${name}${step.detail ? ` — ${step.detail}` : ""}`);
     }
-    const fields = [
+    let fields = [
         {
             name: "STATUS",
             value: `**${String(state).toUpperCase()}**${state === "done" && job.url ? ` → <${job.url}>` : ""}`,
@@ -120,6 +124,25 @@ export function trackerEmbed(job) {
             value: job.urls.map((u) => `<${u}>`).join("\n").slice(0, 800),
             inline: false
         });
+    }
+    if (job.type === "bank") {
+        // Bank jobs never run a pipeline: they are logged for the treasury.
+        fields = [
+            {
+                name: "STATUS",
+                value: `**${String(state).toUpperCase()}** — request received, the bank launches soon`,
+                inline: false
+            },
+            {
+                name: "REQUEST",
+                value: [
+                    job.account ? `account: ${job.account}` : "",
+                    job.amount ? `amount: ${job.amount}` : "",
+                    job.note || ""
+                ].filter(Boolean).join("\n").slice(0, 1000) || "(no details)",
+                inline: false
+            }
+        ];
     }
     return {
         title: `${job.status === "done" ? "🟢" : job.status === "failed" || job.status === "rejected" ? "🔴" : "🟡"} ${TYPE_LABELS[job.type] || job.type} — ${job.title}`,
@@ -219,6 +242,10 @@ export async function requeueStale(env) {
                     await pushQueue(env, job.id);
                     await patchTracker(env, job);
                 }
+            } else if (job.status === "awaiting" && Date.now() - job.createdAt > 30 * 60 * 1000) {
+                job.status = "failed";
+                job.error = "no files were attached within 30 minutes — form submission expired";
+                await finalizeJob(env, job);
             }
         }
         cursor = page.list_complete ? undefined : page.cursor;
@@ -289,10 +316,19 @@ export async function createJob(env, ctx, request) {
         }
     }
 
+    // Forms may submit text-only projects and bank requests with no files.
+    // App/change jobs without an artifact wait for attachments to be bound.
+    let status = "pending";
+    if (type === "bank") {
+        status = "parked";
+    } else if (!fileBytes || fileBytes.byteLength === 0) {
+        status = type === "project" ? "pending" : "awaiting";
+    }
+
     const job = {
         id,
         type,
-        status: "pending",
+        status,
         createdAt: Date.now(),
         userTag,
         userId,
@@ -302,8 +338,15 @@ export async function createJob(env, ctx, request) {
         summary: opts.summary,
         category: opts.category,
         subdomain: opts.subdomain,
+        textOnly: opts.textOnly === true,
+        highlights: opts.highlights,
+        technologies: opts.technologies,
+        envText: opts.envText,
+        account: opts.account,
+        amount: opts.amount,
+        note: opts.note,
         fileName,
-        fileSize: fileBytes.byteLength,
+        fileSize: fileBytes ? fileBytes.byteLength : 0,
         steps: newSteps(type),
         attempts: 0,
         urls: []
@@ -314,9 +357,13 @@ export async function createJob(env, ctx, request) {
     }
 
     // Persist the artifact first so a crashed worker run loses nothing.
-    await env.BLOBS.put(`zips/${id}/${fileName}`, fileBytes);
+    if (fileBytes && fileName) {
+        await env.BLOBS.put(`zips/${id}/${fileName}`, fileBytes);
+    }
     await putJob(env, job);
-    await pushQueue(env, job.id);
+    if (job.status === "pending") {
+        await pushQueue(env, job.id);
+    }
 
     // Fire-and-forget: bot may not be in the guild yet; ensureTracker retries
     // lazily when the runner reports its first progress event.

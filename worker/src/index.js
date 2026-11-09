@@ -10,6 +10,8 @@ import {
     patchTracker,
     popQueue,
     progress,
+    putJob,
+    pushQueue,
     requeueStale,
     trackerEmbed
 } from "./jobs.js";
@@ -423,16 +425,91 @@ async function runner(request, env, ctx) {
         if (!metadataValid(meta, bytes.byteLength)) {
             return json({ error: "invalid job metadata" }, 400);
         }
+        if (meta.type === "app") {
+            const slug = slugChecks(meta.subdomain);
+            if (!slug.ok) {
+                return json({ error: slug.reason }, 400);
+            }
+        }
         const res = await createJob(env, ctx, {
             type: meta.type,
             userTag: meta.userTag || "selftest",
             userId: meta.userId || "0",
             opts: meta,
             dedupeKey: null,
-            fileName: meta.fileName || "submission.zip",
-            fileBytes: bytes
+            fileName: bytes.byteLength ? (meta.fileName || "submission.zip") : null,
+            fileBytes: bytes.byteLength ? bytes : null
         });
         return json(res);
+    }
+
+    // Attach files to a job that opened through a form and is waiting for them.
+    if (request.method === "POST" && route === "/runner/attach") {
+        const meta = JSON.parse(request.headers.get("X-Job") || "{}");
+        const id = String(meta.jobId || "").trim();
+        const job = await getJob(env, id);
+        if (!job) {
+            return json({ error: "unknown job" }, 404);
+        }
+        if (!["app", "project", "change"].includes(job.type)) {
+            return json({ error: "this job type does not take files" }, 400);
+        }
+        if (job.status !== "awaiting") {
+            return json({ error: `job is ${job.status}, not awaiting files` }, 409);
+        }
+        const bytes = await request.arrayBuffer();
+        if (bytes.byteLength === 0) {
+            return json({ error: "empty attachment bundle" }, 400);
+        }
+        if (bytes.byteLength > LIMITS.maxZipBytes) {
+            return json({ error: "attachment bundle over the size cap" }, 400);
+        }
+        job.fileName = String(meta.fileName || "attachments.zip");
+        job.fileSize = bytes.byteLength;
+        job.textOnly = false;
+        await env.BLOBS.put(`zips/${job.id}/${job.fileName}`, bytes);
+        job.status = "pending";
+        await putJob(env, job);
+        await pushQueue(env, job.id);
+        await patchTracker(env, job);
+        return json({ ok: true, jobId: job.id, status: job.status });
+    }
+
+    // Bind a Discord user to a job so their next attachment message completes it.
+    if (request.method === "POST" && route === "/runner/bind") {
+        const p = await request.json();
+        if (!p.userId || !p.jobId) {
+            return json({ error: "userId and jobId required" }, 400);
+        }
+        const ttl = Math.min(Math.max(Number(p.ttlMinutes) || 30, 1), 90) * 60;
+        await env.JOBS.put(`bind:${p.userId}`, JSON.stringify({
+            jobId: p.jobId,
+            type: p.type || "",
+            expiry: Date.now() + ttl * 1000
+        }), { expirationTtl: ttl });
+        return json({ ok: true });
+    }
+
+    if (request.method === "POST" && route === "/runner/unbind") {
+        const p = await request.json();
+        if (p.userId) {
+            await env.JOBS.delete(`bind:${p.userId}`);
+        }
+        return json({ ok: true });
+    }
+
+    if (request.method === "GET" && route.startsWith("/runner/bind/")) {
+        const userId = decodeURIComponent(route.substring("/runner/bind/".length));
+        const raw = await env.JOBS.get(`bind:${userId}`);
+        if (!raw) {
+            return json(null);
+        }
+        const bind = JSON.parse(raw);
+        if (!bind.expiry || bind.expiry < Date.now()) {
+            await env.JOBS.delete(`bind:${userId}`);
+            return json(null);
+        }
+        return json(bind);
     }
 
     if (request.method === "GET" && route.startsWith("/runner/job/")) {
@@ -456,14 +533,16 @@ async function runner(request, env, ctx) {
 }
 
 function metadataValid(meta, size) {
-    if (!["app", "project", "change"].includes(meta.type)) {
+    if (!["app", "project", "change", "bank"].includes(meta.type)) {
         return false;
     }
-    if (size === 0 || size > LIMITS.maxZipBytes) {
+    if (size < 0 || size > LIMITS.maxZipBytes) {
         return false;
     }
-    if (size >= LIMITS.maxZipBytes) {
+    if (meta.type === "bank" && size > 0) {
         return false;
     }
+    // App/change may arrive artifact-less (form first, files bound later);
+    // the runner executes them only after /runner/attach supplies files.
     return true;
 }

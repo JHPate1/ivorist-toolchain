@@ -37,37 +37,48 @@ back, queued jobs execute.
 
 | Channel id | Purpose | Command / drop |
 |---|---|---|
-| `1569366033389588523` | deploy web app | `/create` or drop a zip |
-| `1569366921961545780` | submit project to site | `/project` or drop a zip |
-| `1569367133685678182` | submit change to site | `/change` or drop a zip |
-| `1569367283879387346` | Ivorist Bank | reserved (responds "coming soon") |
+| `1569366033389588523` | deploy web app | `/create` (form) or drop a zip |
+| `1569366921961545780` | submit project to site | `/project` (text form) or drop a zip |
+| `1569367133685678182` | submit change to site | `/change` (form) or drop a zip |
+| `1569367283879387346` | Ivorist Bank | `/bank` (requests are logged) |
 
 ## Commands
 
-- `/create subdomain name description zip` — builds a web app. Strict rules:
+Submission commands (`/create`, `/project`, `/change`, `/bank`) open **modal
+forms**. For app/change submissions the files are attached afterwards as a
+normal channel reply and auto-bound to the open submission — any file type,
+multiple files allowed, wrapped into a safe archive by the bot. Zips remain
+optional everywhere (a zip drop in the channels still works too).
+
+- `/create` — deploy form (subdomain, name, description, optional env lines).
+  After submitting the form, reply in the channel with a zip **or any files**
+  (html/css/js/images). Strict rules:
   - subdomain: `3-32` chars, lowercase letters/numbers/hyphens; no reserved names
   - zip root must have `index.html` (static) or `worker.js` (worker app)
   - no own `wrangler.jsonc` (Ivorist generates the deploy config)
   - executables (`.exe`, `.bat`, `.ps1`, `.php`, …) are rejected
-  - `.env` keys: safe ones become non-secret vars; anything sensitive must be
-    consumed by a `worker.js`, whose code is rewritten
-    `process.env.KEY → env.KEY`, and the value is bound as a Cloudflare secret.
-    Static apps that contain sensitive keys are rejected outright.
+  - env vars can come from the form (`KEY=value` lines) or a `.env` in the zip:
+    safe ones become non-secret vars; anything sensitive must be consumed by a
+    `worker.js`, whose code is rewritten `process.env.KEY → env.KEY`, and the
+    value is bound as a Cloudflare secret. Static apps that contain sensitive
+    keys are rejected outright.
   - each app deploys as `ivorist-app-<sub>` worker on `https://<sub>.ivorists.com`
     with an explicit zone route (the zone's `*.ivorists.com` catch-all is outranked)
-- `/project name category summary zip` — new project page on the site
-
-  - zip root needs `index.html`; the page lands at `projects/<slug>/index.html`
-    and `projects.json` gets an entry (the site renders it dynamically)
-  - branch `projects/<slug>` is pushed then merged to main; the site redeploys
-- `/change summary zip` — patch of site files, mirrored onto repo paths
-  - only whitelisted file types and no infra-owned files (`worker.js`,
-    `wrangler.jsonc`, `.assetsignore`, `logo.png`, …)
+- `/project` — text-only project intake (name, summary, category, walkthrough,
+  technologies). No files needed: the runner **generates the project page**
+  (dark, emerald, fully escaped) at `projects/<slug>/index.html`, updates
+  `projects.json`, merges `projects/<slug>` to main and redeploys the site.
+  A zip drop in this channel still works for hand-made pages.
+- `/change` — change-request form (summary + details); reply with the files to
+  apply (any site-allowed file type, multiple files fine). Only whitelisted
+  file types and no infra-owned files (`worker.js`, `wrangler.jsonc`,
+  `.assetsignore`, `logo.png`, …)
 - `/apps` — list deployed apps with URLs
 - `/status [job_id]` — tracker for a job
 - `/log` — last 10 jobs
 - `/ping` — which parts are online
-- `/bank` — Ivorist Bank placeholder response
+- `/bank` — bank request form; requests are stored and logged for the treasury
+  launch (no pipeline runs for bank jobs)
 
 Every job posts a public tracker embed in its channel and edits it live at
 each pipeline step; rejections and failures post the reason back there too.
