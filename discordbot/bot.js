@@ -264,10 +264,13 @@ const INTENTS = 1 | (1 << 9); // GUILDS + GUILD_MESSAGES (content read via REST)
 
 let ws = null;
 let heartbeatTimer = null;
+let reconnectTimer = null;
 let seq = null;
 let sessionId = null;
 let heartbeatAcked = true;
 let reconnectBackoff = 2000;
+let lastIdentifyAt = 0;
+let nextAttemptIsResume = false;
 
 function opsChannels() {
     return new Set([
@@ -324,12 +327,13 @@ function connect() {
                     heartbeatAcked = false;
                     gatewaySend({ op: 1, d: seq });
                 }, interval);
-                if (sessionId && seq != null) {
+                if (nextAttemptIsResume && sessionId && seq != null) {
                     gatewaySend({
                         op: 6, // RESUME
                         d: { token: config.token, session_id: sessionId, seq }
                     });
                 } else {
+                    lastIdentifyAt = Date.now();
                     gatewaySend({
                         op: 2, // IDENTIFY
                         d: {
@@ -350,9 +354,22 @@ function connect() {
                 heartbeatAcked = true;
                 break;
             }
-            case 7: // RECONNECT
-            case 9: {
-                try { ws.close(4000, "server request"); } catch { /* */ }
+            case 7: { // RECONNECT: server asks for a graceful reconnect; keep the session
+                nextAttemptIsResume = true;
+                try { ws.close(1000, "server requested reconnect"); } catch { /* */ }
+                break;
+            }
+            case 9: { // INVALID_SESSION
+                if (frame.d) {
+                    // d=true: the session survives a resume
+                    nextAttemptIsResume = true;
+                } else {
+                    // d=false: dead session; drop it and identify again later
+                    sessionId = null;
+                    seq = null;
+                    nextAttemptIsResume = false;
+                }
+                try { ws.close(4000, "invalid session"); } catch { /* */ }
                 break;
             }
             case 0:
@@ -363,17 +380,34 @@ function connect() {
         }
     });
 
-    ws.on("close", (code) => {
-        console.log(`gateway closed (${code}) — reconnecting in ${reconnectBackoff}ms`);
-        if (sessionId) {
-            seq = null; // must resume from a fresh seq tracked server-side; drop session politely
-            sessionId = null;
+    ws.on("close", (code, reason) => {
+        const reasonText = String(reason || "").slice(0, 120);
+        const resuming = nextAttemptIsResume && sessionId && seq != null;
+        if (!resuming) {
+            nextAttemptIsResume = false;
         }
+        console.log(`gateway closed (${code}) ${reasonText} — ${resuming ? "resuming session" : "fresh connection"} next`);
+
         if (heartbeatTimer) {
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
         }
-        setTimeout(connect, reconnectBackoff);
+
+        let delay;
+        if (resuming) {
+            delay = reconnectBackoff;
+        } else {
+            // Discord requires a minimum gap between IDENTIFies (about 5s);
+            // hammering it produces INVALID_SESSION storms, which is exactly
+            // what a naive 2-second loop looks like from the inside.
+            const sinceLast = Date.now() - lastIdentifyAt;
+            const gap = 5500 - sinceLast;
+            delay = Math.max(reconnectBackoff, gap) + Math.random() * 1500;
+        }
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+        }
+        reconnectTimer = setTimeout(connect, delay);
         reconnectBackoff = Math.min(reconnectBackoff * 2, 60000);
     });
 
@@ -386,10 +420,12 @@ function connect() {
 function onDispatch(t, d) {
     if (t === "READY") {
         sessionId = d.session_id;
+        nextAttemptIsResume = false;
         console.log(`gateway READY — logged in as ${d.user.username}. Bot is online 24/7.`);
         return;
     }
     if (t === "RESUMED") {
+        nextAttemptIsResume = false;
         console.log("gateway RESUMED");
         return;
     }
