@@ -59,6 +59,20 @@ const COMMANDS = [
     {
         name: "ping",
         description: "Check which parts of the toolchain are online."
+    },
+    {
+        name: "clear",
+        description: "Clear all pending/active jobs or kill a specific job.",
+        options: [
+            { type: 3, name: "job_id", description: "Job id to kill immediately (blank = clear entire queue)", required: false }
+        ]
+    },
+    {
+        name: "kill",
+        description: "Kill a running/pending job immediately without letting it finish.",
+        options: [
+            { type: 3, name: "job_id", description: "Job id to kill immediately (blank = current active job)", required: false }
+        ]
     }
 ];
 

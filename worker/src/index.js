@@ -1,21 +1,30 @@
 import nacl from "tweetnacl";
 
 import {
+    bindUser,
     createJob,
     ensureTracker,
     finalizeJob,
+    getBind,
     getJob,
+    getRunnerAlive,
     listApps,
     listJobs,
+    clearAllJobs,
+    killJob,
+    rest,
+    patchJob,
     patchTracker,
     popQueue,
     progress,
     putJob,
-    pushQueue,
     requeueStale,
-    trackerEmbed
+    reviewJobWithAI,
+    setRunnerAlive,
+    trackerEmbed,
+    unbindUser
 } from "./jobs.js";
-import { GatewayBot } from "./gateway.js";
+import { GatewayBot, MODALS, openModal, modalValues } from "./gateway.js";
 import { LIMITS, slugChecks, pipelineFor } from "../../rules.js";
 
 export { GatewayBot };
@@ -29,12 +38,40 @@ export default {
         const url = new URL(request.url);
 
         if (request.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/")) {
-            const alive = await env.JOBS.get("runner:alive");
+            const aliveTs = await getRunnerAlive(env);
+            const alive = aliveTs && (Date.now() - aliveTs < 600000);
+            let gatewayStatus = "disabled";
+            if (env.GATEWAY_ENABLED === "1" && env.GATEWAY) {
+                try {
+                    const stub = env.GATEWAY.get(env.GATEWAY.idFromName("gateway"));
+                    const gRes = await stub.fetch("https://do.internal/ensure");
+                    if (gRes.ok) {
+                        const gData = await gRes.json();
+                        gatewayStatus = gData.active ? "online" : (gData.started ? "connecting" : "idle");
+                    } else {
+                        gatewayStatus = "error";
+                    }
+                } catch (e) {
+                    gatewayStatus = "error: " + String(e.message || e);
+                }
+            }
             return json({
                 ok: true,
                 discord: env.DISCORD_TOKEN && env.DISCORD_TOKEN !== "set-later" ? "ready" : "not configured",
+                gateway: gatewayStatus,
                 runner: alive ? "online" : "offline"
             });
+        }
+
+        if (url.pathname === "/gateway/start" || url.pathname === "/gateway/ensure" || url.pathname === "/gateway/status") {
+            if (!env.GATEWAY) {
+                return json({ error: "GATEWAY durable object not bound" }, 500);
+            }
+            const action = url.pathname.replace("/gateway/", "/");
+            const stub = env.GATEWAY.get(env.GATEWAY.idFromName("gateway"));
+            const res = await stub.fetch("https://do.internal" + action);
+            const data = await res.json().catch(() => ({}));
+            return json(data, res.status);
         }
 
         if (url.pathname === "/interactions" && request.method === "POST") {
@@ -58,10 +95,13 @@ export default {
             } catch (error) {
                 console.error("cron requeue:", error);
             }
-            try {
-                await env.GATEWAY.fetch("https://do.internal/ensure");
-            } catch (error) {
-                console.error("cron gateway ensure:", error);
+            if (env.GATEWAY_ENABLED === "1" && env.GATEWAY) {
+                try {
+                    const stub = env.GATEWAY.get(env.GATEWAY.idFromName("gateway"));
+                    await stub.fetch("https://do.internal/ensure");
+                } catch (error) {
+                    console.error("cron gateway ensure:", error);
+                }
             }
         })());
     }
@@ -121,22 +161,197 @@ async function interactions(request, env, ctx) {
         return json({ type: 1 }); // PING
     }
 
-    if (interaction.type !== 2) {
-        return json({ type: 1 });
-    }
-
-    let reply;
-    try {
-        reply = await command(interaction, env, ctx);
-        if (!reply) {
-            reply = { content: "…" };
+    // Modal submit (interaction type 5)
+    if (interaction.type === 5) {
+        let reply;
+        try {
+            reply = await handleModalSubmit(interaction, env, ctx);
+            if (!reply) {
+                reply = { content: "…" };
+            }
+        } catch (error) {
+            console.error("modal submit error", error);
+            reply = { content: `⛔ form failed: \`${String(error).slice(0, 200)}\`` };
         }
-    } catch (error) {
-        console.error("interaction error", error);
-        reply = { content: `⛔ command failed: \`${String(error).slice(0, 200)}\`` };
+        return json({ type: RESPOND, data: reply });
     }
 
-    return json({ type: RESPOND, data: reply });
+    // Slash command (interaction type 2)
+    if (interaction.type === 2) {
+        const name = interaction.data?.name;
+        if (MODALS[name]) {
+            const channelVar = {
+                create: "CHANNEL_APP",
+                project: "CHANNEL_PROJECT",
+                change: "CHANNEL_CHANGE",
+                bank: "CHANNEL_BANK"
+            }[name];
+            const err = gate(env, interaction, channelVar);
+            if (err) {
+                return json({ type: RESPOND, data: { content: `✖ ${err}` } });
+            }
+            return json(openModal(name));
+        }
+
+        let reply;
+        try {
+            reply = await command(interaction, env, ctx);
+            if (!reply) {
+                reply = { content: "…" };
+            }
+        } catch (error) {
+            console.error("interaction error", error);
+            reply = { content: `⛔ command failed: \`${String(error).slice(0, 200)}\`` };
+        }
+
+        return json({ type: RESPOND, data: reply });
+    }
+
+    return json({ type: 1 });
+}
+
+function userTagOf(interaction) {
+    return interaction.member?.user?.username || interaction.user?.username || "unknown";
+}
+
+function userIdOf(interaction) {
+    return interaction.member?.user?.id || interaction.user?.id || "0";
+}
+
+async function handleModalSubmit(interaction, env, ctx) {
+    const customId = String(interaction.data?.custom_id || "");
+    if (!customId.startsWith("ivorist:")) {
+        return { content: "⁉ unknown modal" };
+    }
+    const command = customId.replace("ivorist:", "");
+    const v = modalValues(interaction);
+    const userTag = userTagOf(interaction);
+    const userId = userIdOf(interaction);
+
+    if (command === "create") {
+        const slug = slugChecks(v.subdomain);
+        if (!slug.ok) {
+            return { content: `✖ ${slug.reason}` };
+        }
+        const res = await createJob(env, ctx, {
+            type: "app",
+            userTag,
+            userId,
+            dedupeKey: interaction.id,
+            opts: {
+                type: "app",
+                subdomain: slug.subdomain,
+                name: v.name || slug.subdomain,
+                description: (v.description || "").slice(0, 1000),
+                envText: (v.envtext || "").slice(0, 4000) || undefined
+            },
+            fileName: null,
+            fileBytes: null
+        });
+        if (res.duplicate) {
+            return { content: `ℹ duplicate submission — job \`${res.jobId}\` already handles it` };
+        }
+        await bindUser(env, userId, res.jobId, "app", 30);
+        return {
+            content:
+                `🧾 job \`${res.jobId}\` — form queued for **https://${slug.subdomain}.ivorists.com**!\n` +
+                `▶ **Pipeline started immediately.** (Optional: reply in this channel with custom files/zip within 30 min to customize the app).`
+        };
+    }
+
+    if (command === "project") {
+        if (!v.name || !v.summary) {
+            return { content: "✖ name and summary are required" };
+        }
+        const res = await createJob(env, ctx, {
+            type: "project",
+            userTag,
+            userId,
+            dedupeKey: interaction.id,
+            opts: {
+                type: "project",
+                textOnly: true,
+                name: v.name.slice(0, 60),
+                summary: v.summary.slice(0, 300),
+                category: (v.category || "Software").slice(0, 40),
+                description: (v.description || "").slice(0, 2000),
+                technologies: (v.tech || "").slice(0, 200)
+            },
+            fileName: null,
+            fileBytes: null
+        });
+        if (res.duplicate) {
+            return { content: `ℹ duplicate submission — job \`${res.jobId}\` already handles it` };
+        }
+        return {
+            content:
+                `🧾 job \`${res.jobId}\` — **${v.name.slice(0, 60)}** entered the pipeline. No files attached: the project page is generated entirely from this form.\n` +
+                `Follow the tracker embed in this channel.`
+        };
+    }
+
+    if (command === "change") {
+        if (!v.summary) {
+            return { content: "✖ summary is required" };
+        }
+        const res = await createJob(env, ctx, {
+            type: "change",
+            userTag,
+            userId,
+            dedupeKey: interaction.id,
+            opts: {
+                type: "change",
+                name: v.summary.slice(0, 60),
+                summary: v.summary.slice(0, 300),
+                note: (v.note || "").slice(0, 1000)
+            },
+            fileName: null,
+            fileBytes: null
+        });
+        if (res.duplicate) {
+            return { content: `ℹ duplicate submission — job \`${res.jobId}\` already handles it` };
+        }
+        await bindUser(env, userId, res.jobId, "change", 30);
+        return {
+            content:
+                `🧾 job \`${res.jobId}\` — change request queued: **${v.summary.slice(0, 300)}**\n` +
+                `▶ **Pipeline started immediately.** (Optional: reply in this channel with custom files to apply).`
+        };
+    }
+
+    if (command === "bank") {
+        if (!v.account) {
+            return { content: "✖ account/purpose is required" };
+        }
+        const res = await createJob(env, ctx, {
+            type: "bank",
+            userTag,
+            userId,
+            dedupeKey: interaction.id,
+            opts: {
+                type: "bank",
+                name: v.account.slice(0, 60),
+                account: v.account.slice(0, 100),
+                amount: (v.amount || "").slice(0, 40),
+                note: (v.note || "").slice(0, 1000)
+            },
+            fileName: null,
+            fileBytes: null
+        });
+        return {
+            embeds: [{
+                title: "Ivorist Bank — request logged",
+                color: 0x2f6b49,
+                description:
+                    `🏦 **Ivorist Bank is coming soon.** Your request was stored in the ops log and will be processed when the treasury launches.\n\n` +
+                    `**account/purpose:** ${v.account.slice(0, 100)}${v.amount ? `\n**amount:** ${String(v.amount).slice(0, 40)}` : ""}${v.note ? `\n**details:** ${String(v.note).slice(0, 400)}` : ""}\n\n` +
+                    `job id: \`${res.jobId}\` • find it any time with \`/log\``,
+                footer: { text: "Ivorist Ops" }
+            }]
+        };
+    }
+
+    return { content: "⁉ unknown form" };
 }
 
 function optsMap(interaction) {
@@ -160,12 +375,12 @@ function attachmentFor(interaction) {
 }
 
 function gate(env, interaction, channelVar) {
-    if (env.GUILD_ID && interaction.guild_id !== env.GUILD_ID) {
+    if (env.GUILD_ID && interaction.guild_id && interaction.guild_id !== env.GUILD_ID) {
         return "this command only works inside the Ivorist server";
     }
     const channel = env[channelVar];
-    if (channel && interaction.channel_id !== channel) {
-        return "wrong channel for this command";
+    if (channel && interaction.channel_id && interaction.channel_id !== channel) {
+        return `this command belongs in <#${channel}>`;
     }
     return null;
 }
@@ -188,7 +403,8 @@ async function command(interaction, env, ctx) {
     const options = optsMap(interaction);
 
     if (name === "ping") {
-        const alive = await env.JOBS.get("runner:alive");
+        const aliveTs = await getRunnerAlive(env);
+        const alive = aliveTs && (Date.now() - aliveTs < 600000);
         return {
             content: `🟢 gateway edge: online\n🟡 runner: ${alive ? "online (this PC reachable)" : "offline — jobs will queue here until the PC is back"}`
         };
@@ -357,6 +573,29 @@ async function command(interaction, env, ctx) {
         };
     }
 
+    if (name === "clear" || name === "kill" || name === "cancel") {
+        const targetId = options.job_id ? String(options.job_id).trim() : null;
+        if (targetId) {
+            const res = await killJob(env, targetId, `killed via /${name} by ${userTagOf(interaction)}`);
+            if (!res.ok) {
+                return { content: `✖ could not kill job \`${targetId}\`: ${res.error}` };
+            }
+            return { content: `🛑 **Job \`${targetId}\` was killed immediately.** Pipeline execution aborted.` };
+        } else {
+            if (name === "clear") {
+                const clearRes = await clearAllJobs(env);
+                return { content: `🧹 **Cleared ${clearRes.cleared} job(s) from state.** All queues and pending tasks wiped.` };
+            }
+            const jobs = await listJobs(env, 10);
+            const activeJob = jobs.find((j) => j.status === "running" || j.status === "pending" || j.status === "awaiting");
+            if (!activeJob) {
+                return { content: "ℹ no active or pending jobs to kill." };
+            }
+            await killJob(env, activeJob.id, `killed via /${name} by ${userTagOf(interaction)}`);
+            return { content: `🛑 **Active job \`${activeJob.id}\` (${activeJob.title}) killed immediately.** Pipeline execution aborted.` };
+        }
+    }
+
     return { content: `⁉ unknown command ${name}` };
 }
 
@@ -369,6 +608,14 @@ async function runner(request, env, ctx) {
     const route = url.pathname;
 
     if (request.method === "POST" && route === "/runner/claim") {
+        if (env.GATEWAY_ENABLED === "1" && env.GATEWAY) {
+            ctx.waitUntil((async () => {
+                try {
+                    const stub = env.GATEWAY.get(env.GATEWAY.idFromName("gateway"));
+                    await stub.fetch("https://do.internal/ensure");
+                } catch { /* background keepalive */ }
+            })());
+        }
         const job = await popQueue(env);
         if (job) {
             ctx.waitUntil(ensureTracker(env, job).then((j) => patchTracker(env, j)));
@@ -401,7 +648,7 @@ async function runner(request, env, ctx) {
     }
 
     if (request.method === "POST" && route === "/runner/heartbeat") {
-        await env.JOBS.put("runner:alive", Date.now().toString(), { expirationTtl: 150 });
+        await setRunnerAlive(env, Date.now());
         return json({ ok: true });
     }
 
@@ -454,7 +701,7 @@ async function runner(request, env, ctx) {
         if (!["app", "project", "change"].includes(job.type)) {
             return json({ error: "this job type does not take files" }, 400);
         }
-        if (job.status !== "awaiting") {
+        if (!["awaiting", "pending"].includes(job.status)) {
             return json({ error: `job is ${job.status}, not awaiting files` }, 409);
         }
         const bytes = await request.arrayBuffer();
@@ -468,11 +715,36 @@ async function runner(request, env, ctx) {
         job.fileSize = bytes.byteLength;
         job.textOnly = false;
         await env.BLOBS.put(`zips/${job.id}/${job.fileName}`, bytes);
-        job.status = "pending";
-        await putJob(env, job);
-        await pushQueue(env, job.id);
-        await patchTracker(env, job);
-        return json({ ok: true, jobId: job.id, status: job.status });
+        const updated = await patchJob(env, job.id, {
+            fileName: String(meta.fileName || "attachments.zip"),
+            fileSize: bytes.byteLength,
+            textOnly: false,
+            status: "pending"
+        });
+        const currentJob = updated || { ...job, fileName: String(meta.fileName || "attachments.zip"), fileSize: bytes.byteLength, textOnly: false, status: "pending" };
+        await patchTracker(env, currentJob);
+        if (!currentJob.aiReview) {
+            ctx.waitUntil(reviewJobWithAI(env, currentJob).catch(() => {}));
+        }
+        return json({ ok: true, jobId: job.id, status: currentJob.status });
+    }
+
+    if (request.method === "POST" && route === "/runner/test-ai") {
+        const dummyJob = {
+            id: "diag-" + Date.now().toString(36),
+            type: "project",
+            title: "NVIDIA Endpoint Connectivity Test",
+            name: "NVIDIA Endpoint Connectivity Test",
+            summary: "Verifying live endpoint response",
+            userTag: "selftest",
+            status: "pending",
+            steps: {},
+            createdAt: Date.now()
+        };
+        const start = Date.now();
+        await reviewJobWithAI(env, dummyJob);
+        const durationMs = Date.now() - start;
+        return json({ ok: true, durationMs, aiReview: dummyJob.aiReview });
     }
 
     // Bind a Discord user to a job so their next attachment message completes it.
@@ -481,35 +753,22 @@ async function runner(request, env, ctx) {
         if (!p.userId || !p.jobId) {
             return json({ error: "userId and jobId required" }, 400);
         }
-        const ttl = Math.min(Math.max(Number(p.ttlMinutes) || 30, 1), 90) * 60;
-        await env.JOBS.put(`bind:${p.userId}`, JSON.stringify({
-            jobId: p.jobId,
-            type: p.type || "",
-            expiry: Date.now() + ttl * 1000
-        }), { expirationTtl: ttl });
+        await bindUser(env, p.userId, p.jobId, p.type, p.ttlMinutes);
         return json({ ok: true });
     }
 
     if (request.method === "POST" && route === "/runner/unbind") {
         const p = await request.json();
         if (p.userId) {
-            await env.JOBS.delete(`bind:${p.userId}`);
+            await unbindUser(env, p.userId);
         }
         return json({ ok: true });
     }
 
     if (request.method === "GET" && route.startsWith("/runner/bind/")) {
         const userId = decodeURIComponent(route.substring("/runner/bind/".length));
-        const raw = await env.JOBS.get(`bind:${userId}`);
-        if (!raw) {
-            return json(null);
-        }
-        const bind = JSON.parse(raw);
-        if (!bind.expiry || bind.expiry < Date.now()) {
-            await env.JOBS.delete(`bind:${userId}`);
-            return json(null);
-        }
-        return json(bind);
+        const bind = await getBind(env, userId);
+        return json(bind || null);
     }
 
     if (request.method === "GET" && route.startsWith("/runner/job/")) {
@@ -523,6 +782,59 @@ async function runner(request, env, ctx) {
 
     if (request.method === "GET" && route === "/runner/jobs") {
         return json(await listJobs(env, 20));
+    }
+
+    if (request.method === "POST" && route === "/runner/jobs/clear") {
+        const res = await clearAllJobs(env);
+        return json(res);
+    }
+
+    if (request.method === "POST" && route === "/runner/register-commands") {
+        const appRes = await rest(env, "GET", "/oauth2/applications/@me");
+        if (!appRes.ok || !appRes.data?.id) {
+            return json({ error: "could not fetch application id from Discord", detail: appRes.error }, 500);
+        }
+        const appId = appRes.data.id;
+        const guildId = env.GUILD_ID;
+        const targetPath = guildId
+            ? `/applications/${appId}/guilds/${guildId}/commands`
+            : `/applications/${appId}/commands`;
+
+        const commands = [
+            { name: "create", description: "Open the deploy form — files are attached in the channel afterwards." },
+            { name: "project", description: "Open the project form — text alone builds the project page." },
+            { name: "change", description: "Open the site-change form — attach files in the channel afterwards." },
+            { name: "bank", description: "Open the Ivorist Bank request form (logged until launch)." },
+            { name: "apps", description: "List deployed web apps." },
+            {
+                name: "status",
+                description: "Show the tracker embed for a job.",
+                options: [{ type: 3, name: "job_id", description: "Job id, e.g. j-a1b2c3-xyz (blank = latest)", required: false }]
+            },
+            { name: "log", description: "Recent job log." },
+            { name: "ping", description: "Check which parts of the toolchain are online." },
+            {
+                name: "clear",
+                description: "Clear all pending/active jobs or kill a specific job.",
+                options: [{ type: 3, name: "job_id", description: "Job id to kill immediately (blank = clear entire queue)", required: false }]
+            },
+            {
+                name: "kill",
+                description: "Kill a running/pending job immediately without letting it finish.",
+                options: [{ type: 3, name: "job_id", description: "Job id to kill immediately (blank = current active job)", required: false }]
+            }
+        ];
+
+        const regRes = await rest(env, "PUT", targetPath, commands);
+        return json(regRes);
+    }
+
+    if (request.method === "POST" && route.startsWith("/runner/job/") && route.endsWith("/kill")) {
+        const parts = route.split("/");
+        const id = decodeURIComponent(parts[parts.length - 2]);
+        const body = await request.json().catch(() => ({}));
+        const res = await killJob(env, id, body.reason || "killed by runner request");
+        return json(res, res.ok ? 200 : 404);
     }
 
     if (request.method === "GET" && route === "/runner/apps") {
@@ -542,7 +854,5 @@ function metadataValid(meta, size) {
     if (meta.type === "bank" && size > 0) {
         return false;
     }
-    // App/change may arrive artifact-less (form first, files bound later);
-    // the runner executes them only after /runner/attach supplies files.
     return true;
 }

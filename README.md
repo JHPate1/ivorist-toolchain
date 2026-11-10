@@ -9,7 +9,7 @@ Discord (channels / slash commands)
         │  events + interactions
         ▼
 ivorist-gateway (Cloudflare Worker + Durable Object)
-        │  KV job queue  ·  R2 artifact store  ·  live status embeds
+        │  DO state store  ·  R2 artifact store  ·  NVIDIA AI review  ·  live embeds
         ▼
 runner daemon (this PC, this OpenCode session)
         │  rules  ·  secret scan/rewrite  ·  git  ·  wrangler deploys
@@ -19,14 +19,21 @@ ivorists.com  ·  <app>.ivorists.com  ·  github.com/JHPate1/ivorist
 
 The bot is served 24/7 by the Cloudflare Durable Object (gateway WebSocket),
 so it answers and queues even when this PC is off. When the runner comes
-back, queued jobs execute.
+back, queued jobs execute. All state (jobs, binds, dedupe, apps, runner heartbeats)
+lives in SQLite storage inside the GatewayBot Durable Object, completely bypassing
+Cloudflare KV daily put() limits.
+
+Every job created immediately goes to the NVIDIA OpenAI-compatible endpoint
+(`https://integrate.api.nvidia.com/v1`, model `z-ai/glm-5.3-flash`, `chat.completions`)
+for an automatic review and summary, which is stored in the job status and displayed
+in the live Discord embed.
 
 ## Layout
 
 - `worker/` — the Cloudflare gateway (`ivorist-gateway`)
   - `src/index.js` — interactions endpoint, runner API, cron re-queue
-  - `src/gateway.js` — Durable Object holding the 24/7 gateway session
-  - `src/jobs.js` — job store, embeds, Discord REST
+  - `src/gateway.js` — Durable Object holding the 24/7 gateway session and SQLite storage
+  - `src/jobs.js` — job store, AI review integration, embeds, Discord REST
 - `../rules.js` — shared submission rules (worker and runner import it)
 - `runner/` — local executor (zero npm deps)
   - `runner.js` — claim → artifact → rules → git → deploy → report loop
@@ -74,9 +81,9 @@ optional everywhere (a zip drop in the channels still works too).
   file types and no infra-owned files (`worker.js`, `wrangler.jsonc`,
   `.assetsignore`, `logo.png`, …)
 - `/apps` — list deployed apps with URLs
-- `/status [job_id]` — tracker for a job
+- `/status [job_id]` — tracker for a job (shows status, pipeline, and AI review)
 - `/log` — last 10 jobs
-- `/ping` — which parts are online
+- `/ping` — which parts are online (gateway edge and local runner)
 - `/bank` — bank request form; requests are stored and logged for the treasury
   launch (no pipeline runs for bank jobs)
 
@@ -86,11 +93,12 @@ each pipeline step; rejections and failures post the reason back there too.
 ## Setup (once)
 
 1. Deploy the gateway: `cd worker && npx wrangler deploy`
-2. Provide Discord credentials as secrets:
+2. Provide credentials as secrets:
    ```
    npx wrangler secret put DISCORD_TOKEN      # bot token
    npx wrangler secret put DISCORD_PUBLIC_KEY # app public key
    npx wrangler secret put RUNNER_TOKEN       # same value as runner-config.json
+   npx wrangler secret put NVIDIA_API_KEY     # NVIDIA OpenAI-compatible API key
    npx wrangler deploy
    ```
 3. Fill `runner/runner-config.json` (copy from `.example`), then register
@@ -102,8 +110,9 @@ each pipeline step; rejections and failures post the reason back there too.
 
 ## Failure modes
 
-- Runner offline: jobs queue in Cloudflare KV; a 5-minute cron requeues
-  jobs whose runner died mid-execution (2 attempts, then it fails loudly).
+- Runner offline: jobs stay pending in Durable Object storage without exhausting KV limits;
+  a 5-minute cron requeues jobs whose runner died mid-execution (2 attempts, then it fails loudly).
+- Empty poll writes: `/runner/claim` performs zero storage writes when no pending jobs exist.
 - 30 MB zip cap, 800 file cap, 3× extraction ratio cap, path traversal and
   duplicate-interaction guards on the worker side.
 - Secrets never land in the git repo: `.env` files are consumed by the

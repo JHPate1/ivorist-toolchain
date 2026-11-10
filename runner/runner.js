@@ -67,10 +67,19 @@ async function post(route, body) {
     return res.json();
 }
 
-function progress(jobId, step, state, detail) {
-    return post("/runner/progress", { jobId, step, state, detail }).catch((error) => {
+async function progress(jobId, step, state, detail) {
+    try {
+        const res = await post("/runner/progress", { jobId, step, state, detail });
+        if (res && res.killed) {
+            throw new Rejection("job was killed immediately by user request — pipeline aborted");
+        }
+        return res;
+    } catch (error) {
+        if (error && error.rejection) {
+            throw error;
+        }
         console.error("progress post failed:", String(error).slice(0, 160));
-    });
+    }
 }
 
 function heartbeatLoop() {
@@ -298,6 +307,103 @@ ${tech.length ? `\n    <div class=\"chips\">${tech.map((t) => `<span class=\"chi
 `;
 }
 
+function generateWebAppPage(job) {
+    const name = escapeHtml(job.name || job.subdomain || "Ivorist App");
+    const sub = escapeHtml(job.subdomain || "app");
+    const desc = escapeHtml(job.description || "Welcome to your new web application on Ivorist.");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${name} · Ivorist</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: #0a0e0b;
+    color: #e7ece9;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+.card {
+    max-width: 640px;
+    width: 100%;
+    background: #111714;
+    border: 1px solid #1f2d26;
+    border-radius: 16px;
+    padding: 40px;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+}
+.badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #34d399;
+    background: #0b2319;
+    border: 1px solid #1a4231;
+    border-radius: 999px;
+    padding: 4px 12px;
+    margin-bottom: 16px;
+}
+h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+}
+p {
+    color: #9cb1a6;
+    font-size: 16px;
+    margin-bottom: 24px;
+}
+.url-box {
+    background: #0a0e0b;
+    border: 1px solid #1d2722;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 14px;
+    color: #6ee7b7;
+    margin-bottom: 24px;
+    word-break: break-all;
+}
+footer {
+    border-top: 1px solid #1d2722;
+    padding-top: 16px;
+    color: #67786f;
+    font-size: 13px;
+}
+footer a { color: #34d399; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="card">
+    <span class="badge">Live Web App</span>
+    <h1>${name}</h1>
+    <p>${desc}</p>
+    <div class="url-box">https://${sub}.ivorists.com</div>
+    <footer>Deployed automatically via <a href="https://ivorists.com">Ivorist Ops</a>.</footer>
+</div>
+</body>
+</html>
+`;
+}
+
+function generateSiteChangePage(job) {
+    const title = escapeHtml(job.name || job.summary || "Site Update");
+    const summary = escapeHtml(job.summary || "");
+    const note = escapeHtml(job.note || "");
+    return `<!-- Ivorist Change: ${title} -->\n<!-- Summary: ${summary} -->\n<!-- Note: ${note} -->\n`;
+}
+
 /* -------------------- rejection helpers -------------------- */
 
 class Rejection extends Error {
@@ -356,8 +462,17 @@ async function runPipeline(job) {
         // text-only project form: the page is generated from the submitted fields
         writeFileSync(path.join(unpack, "index.html"), generateProjectPage(job));
         await progress(job.id, step0, "active", "text-only project (generated from the form)");
+    } else if (job.type === "app") {
+        // text-only web app form: generates a launch landing page
+        writeFileSync(path.join(unpack, "index.html"), generateWebAppPage(job));
+        await progress(job.id, step0, "active", "text-only web app (generated launch page)");
+    } else if (job.type === "change") {
+        // text-only change request: creates a record in the site repository
+        const changeSlug = `change-${job.id.replace(/[^a-z0-9-]/gi, "")}.html`;
+        writeFileSync(path.join(unpack, changeSlug), generateSiteChangePage(job));
+        await progress(job.id, step0, "active", "text-only change note created");
     } else {
-        throw new Rejection("this submission has no files attached — reply with your files in the channel (the form alone is not enough for this job type)");
+        throw new Rejection("this submission has no files attached and unrecognized job type");
     }
 
     const files = walk(unpack);
@@ -881,8 +996,7 @@ function writeDeployConfig(deployDir, subdomain, hasWorker, secretKeys, vars, co
         compatibility_date: "2025-05-01",
         workers_dev: true,
         assets: {
-            directory: deployDir,
-            binding: "ASSETS"
+            directory: deployDir
         },
         routes: [
             {
@@ -891,6 +1005,9 @@ function writeDeployConfig(deployDir, subdomain, hasWorker, secretKeys, vars, co
             }
         ]
     };
+    if (hasWorker) {
+        config.assets.binding = "ASSETS";
+    }
     if (countVars) {
         const asVars = Object.fromEntries(Object.entries(vars || {}).map(([k, v]) => [k, v]));
         if (Object.keys(asVars).length) {

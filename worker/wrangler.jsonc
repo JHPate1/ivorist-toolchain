@@ -1,6 +1,6 @@
-﻿// Ivorist Gateway: Discord-facing edge + job queue + artifact store.
+// Ivorist Gateway: Discord-facing edge + DO state store + artifact store.
 // Discord Interactions endpoint + 24/7 gateway session (Durable Object),
-// KV job queue, R2 artifact storage, cron re-queue safety net.
+// DO job/state storage, R2 artifact storage, cron re-queue safety net.
 {
     "$schema": "node_modules/wrangler/config-schema.json",
     "name": "ivorist-gateway",
@@ -8,13 +8,6 @@
     "compatibility_date": "2025-05-01",
 
     "workers_dev": true,
-
-    "kv_namespaces": [
-        {
-            "binding": "JOBS",
-            "id": "74404c48dccd47e5b6d44d32287f715c"
-        }
-    ],
 
     "r2_buckets": [
         {
@@ -52,13 +45,14 @@
         "APP_DOMAIN_BASE": "ivorists.com",
         // "1" = the Durable Object holds the Discord gateway session itself.
         // "0" = an external bot (AWS discordbot/) owns the session instead.
-        "GATEWAY_ENABLED": "0"
+        "GATEWAY_ENABLED": "1"
     },
 
     // Secrets (set with `npx wrangler secret put`):
     //   DISCORD_TOKEN       bot token (from the Discord developer portal)
     //   DISCORD_PUBLIC_KEY  application public key (interaction signature check)
     //   RUNNER_TOKEN        shared secret for the local runner daemon
+    //   NVIDIA_API_KEY      NVIDIA OpenAI-compatible endpoint API key
     "observability": {
         "enabled": true
     }
