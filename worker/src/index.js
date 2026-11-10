@@ -841,6 +841,11 @@ async function runner(request, env, ctx) {
         return json(await listApps(env));
     }
 
+    if (request.method === "DELETE" && route.startsWith("/runner/apps/")) {
+        const slug = decodeURIComponent(route.slice("/runner/apps/".length));
+        return json(await forgetApp(env, slug));
+    }
+
     return json({ error: "not found" }, 404);
 }
 

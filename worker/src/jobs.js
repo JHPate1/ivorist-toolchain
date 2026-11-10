@@ -305,6 +305,10 @@ export async function rememberApp(env, job) {
     return doFetch(env, "/apps", "POST", { entry });
 }
 
+export async function forgetApp(env, slug) {
+    return doFetch(env, `/apps?slug=${encodeURIComponent(String(slug || ""))}`, "DELETE");
+}
+
 /* -------------------- embed live updates -------------------- */
 
 export async function ensureTracker(env, job) {

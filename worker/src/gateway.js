@@ -313,6 +313,17 @@ export class GatewayBot {
         return updated;
     }
 
+    async dropApp(slug) {
+        if (!slug) {
+            return { ok: false, error: "missing slug" };
+        }
+        const apps = await this.getApps();
+        const remaining = apps.filter((a) => a.slug !== slug);
+        const dropped = remaining.length < apps.length;
+        await this.state.storage.put("apps", remaining);
+        return { ok: true, dropped, slug };
+    }
+
     async getGuidance(channelId) {
         const raw = await this.state.storage.get(`guidance:${channelId}`);
         if (!raw) return false;
@@ -426,6 +437,9 @@ export class GatewayBot {
         }
         if (pathname === "/apps" && method === "POST") {
             return this.putApp(body.entry);
+        }
+        if (pathname === "/apps" && method === "DELETE") {
+            return this.dropApp(searchParams.get("slug"));
         }
         if (pathname === "/guidance" && method === "GET") {
             const channelId = searchParams.get("channelId");
